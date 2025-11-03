@@ -3,18 +3,21 @@ main.py
 Google Maps 식당 정보 및 리뷰 수집 전체 파이프라인 (Grid 기반)
 
 사용법:
-    # 전체 그리드 실행
+    # Tier 기반 자동 조정 모드 (권장)
+    python main.py --grid_file girdInfo.txt --use_tier_based_restaurants --max_reviews 50 --headless
+
+    # 기존 방식: 모든 그리드에 동일한 식당 개수
     python main.py --grid_file girdInfo.txt --max_restaurants 30 --max_reviews 50 --headless
 
-    # 팀원별 작업 분할 (59개 그리드를 3명이 나눠서 작업)
+    # Tier 기반 모드로 팀원별 작업 분할 (59개 그리드를 3명이 나눠서 작업)
     # 팀원 1: 그리드 0~19
-    python main.py --grid_file girdInfo.txt --start_from 0 --limit 20 --max_restaurants 30 --max_reviews 50 --headless
+    python main.py --grid_file girdInfo.txt --start_from 0 --limit 20 --use_tier_based_restaurants --max_reviews 50 --headless
 
     # 팀원 2: 그리드 20~39
-    python main.py --grid_file girdInfo.txt --start_from 20 --limit 20 --max_restaurants 30 --max_reviews 50 --headless
+    python main.py --grid_file girdInfo.txt --start_from 20 --limit 20 --use_tier_based_restaurants --max_reviews 50 --headless
 
     # 팀원 3: 그리드 40~58
-    python main.py --grid_file girdInfo.txt --start_from 40 --limit 19 --max_restaurants 30 --max_reviews 50 --headless
+    python main.py --grid_file girdInfo.txt --start_from 40 --limit 19 --use_tier_based_restaurants --max_reviews 50 --headless
 
     # 특정 그리드만 테스트
     python main.py --grid_file girdInfo.txt --limit 1 --max_restaurants 10 --max_reviews 20
@@ -27,7 +30,9 @@ import os
 import re
 import time
 import json
+import csv
 from datetime import datetime
+import config  # tier 설정 가져오기
 
 
 class GridBasedPipelineRunner:
@@ -36,6 +41,44 @@ class GridBasedPipelineRunner:
         self.start_time = None
         self.restaurants_dir = args.restaurants_dir
         self.reviews_dir = args.reviews_dir
+        self.tier_dict = {}  # tier 정보 저장
+
+        # tier 기반 모드가 활성화된 경우 tier 정보 로드
+        if args.use_tier_based_restaurants:
+            self.tier_dict = self.load_tier_info(args.tier_file)
+
+    def load_tier_info(self, csv_path):
+        """
+        grid_tier.csv 파일을 읽어서 {code: tier} 딕셔너리 반환
+        예: {"MN1": "HOT", "MN2": "HOT", ...}
+        """
+        tier_dict = {}
+        if not os.path.exists(csv_path):
+            print(f"경고: {csv_path} 파일이 없습니다. 기본값(MID)을 사용합니다.")
+            return tier_dict
+
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                code = row.get('code', '').strip()
+                tier = row.get('tier', '').strip()
+                if code and tier:
+                    tier_dict[code] = tier
+
+        print(f"✓ Tier 정보 로드 완료: {len(tier_dict)}개 그리드")
+        return tier_dict
+
+    def get_max_restaurants_by_tier(self, grid_code):
+        """
+        tier에 따라 가져올 식당 개수 반환
+        config.py의 TIER_RESTAURANT_COUNT 사용
+        tier 정보가 없으면 args.max_restaurants 사용
+        """
+        if not self.args.use_tier_based_restaurants:
+            return self.args.max_restaurants
+
+        tier = self.tier_dict.get(grid_code, "MID")
+        return config.TIER_RESTAURANT_COUNT.get(tier.upper(), self.args.max_restaurants)
 
     def print_header(self, title):
         """섹션 헤더 출력"""
@@ -114,8 +157,14 @@ class GridBasedPipelineRunner:
         query = f"restaurants in {area_en} New York"
         output_file = os.path.join(self.restaurants_dir, f"restaurants_{code}.json")
 
+        # tier 기반으로 max_restaurants 결정
+        max_restaurants = self.get_max_restaurants_by_tier(code)
+        tier = self.tier_dict.get(code, "DEFAULT") if self.args.use_tier_based_restaurants else "N/A"
+
         print(f"\n{'='*80}")
         print(f"[{code}] {district['area_kr']} ({area_en})")
+        if self.args.use_tier_based_restaurants:
+            print(f"Tier: {tier} | 목표 식당 개수: {max_restaurants}개")
         print(f"Query: {query}")
         print(f"Output: {output_file}")
         print(f"{'='*80}")
@@ -124,7 +173,7 @@ class GridBasedPipelineRunner:
             sys.executable,
             'getRestaurantsInfo.py',
             '--query', query,
-            '--max_results', str(self.args.max_restaurants),
+            '--max_results', str(max_restaurants),
             '--output', output_file
         ]
 
@@ -294,7 +343,13 @@ class GridBasedPipelineRunner:
         print(f"\n설정:")
         print(f"  그리드 파일: {self.args.grid_file}")
         print(f"  처리할 그리드: {len(districts_to_process)}개 (전체 {len(districts)}개 중 {start_idx}~{end_idx-1})")
-        print(f"  그리드당 최대 레스토랑: {self.args.max_restaurants}개")
+        if self.args.use_tier_based_restaurants:
+            # config에서 tier 설정을 동적으로 가져와서 표시
+            tier_info = ", ".join([f"{tier}:{count}" for tier, count in config.TIER_RESTAURANT_COUNT.items()])
+            print(f"  레스토랑 수집 모드: Tier 기반 자동 조정 ({tier_info})")
+            print(f"  Tier 파일: {self.args.tier_file}")
+        else:
+            print(f"  그리드당 최대 레스토랑: {self.args.max_restaurants}개")
         print(f"  레스토랑당 최대 리뷰: {self.args.max_reviews if self.args.max_reviews else '제한 없음'}")
         print(f"  헤드리스 모드: {'예' if self.args.headless else '아니오'}")
         print(f"  API 요청 간 대기 시간: {self.args.delay}초")
@@ -333,23 +388,29 @@ class GridBasedPipelineRunner:
 
 
 def main():
+    # config에서 tier 정보 가져오기
+    tier_info_text = ", ".join([f"{tier}:{count}개" for tier, count in config.TIER_RESTAURANT_COUNT.items()])
+
     parser = argparse.ArgumentParser(
         description='Google Maps 그리드 기반 식당 정보 및 리뷰 수집 파이프라인',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 사용 예시:
-  # 전체 그리드 실행
+  # Tier 기반 자동 조정 모드로 전체 그리드 실행 ({tier_info_text})
+  python main.py --grid_file girdInfo.txt --use_tier_based_restaurants --max_reviews 50 --headless
+
+  # 기존 방식: 모든 그리드에 동일한 식당 개수
   python main.py --grid_file girdInfo.txt --max_restaurants 30 --max_reviews 50 --headless
 
-  # 팀원별 작업 분할 (59개 그리드를 3명이 나눠서 작업)
+  # Tier 기반 모드로 팀원별 작업 분할 (59개 그리드를 3명이 나눠서 작업)
   # 팀원 1: 그리드 0~19
-  python main.py --grid_file girdInfo.txt --start_from 0 --limit 20 --max_restaurants 30 --max_reviews 50 --headless
+  python main.py --grid_file girdInfo.txt --start_from 0 --limit 20 --use_tier_based_restaurants --max_reviews 50 --headless
 
   # 팀원 2: 그리드 20~39
-  python main.py --grid_file girdInfo.txt --start_from 20 --limit 20 --max_restaurants 30 --max_reviews 50 --headless
+  python main.py --grid_file girdInfo.txt --start_from 20 --limit 20 --use_tier_based_restaurants --max_reviews 50 --headless
 
   # 팀원 3: 그리드 40~58
-  python main.py --grid_file girdInfo.txt --start_from 40 --limit 19 --max_restaurants 30 --max_reviews 50 --headless
+  python main.py --grid_file girdInfo.txt --start_from 40 --limit 19 --use_tier_based_restaurants --max_reviews 50 --headless
 
   # 특정 그리드만 테스트
   python main.py --grid_file girdInfo.txt --limit 1 --max_restaurants 10 --max_reviews 20
@@ -366,7 +427,14 @@ def main():
 
     # 식당 정보 수집 관련
     parser.add_argument('--max_restaurants', type=int, default=30,
-                        help='그리드당 최대 레스토랑 수 (기본값: 30)')
+                        help='그리드당 최대 레스토랑 수 (기본값: 30, tier 모드가 아닐 때 사용)')
+
+    # config에서 tier 설정 가져오기
+    tier_info_str = ", ".join([f"{tier}:{count}" for tier, count in config.TIER_RESTAURANT_COUNT.items()])
+    parser.add_argument('--use_tier_based_restaurants', action='store_true',
+                        help=f'grid_tier.csv 기반으로 tier에 따라 식당 개수 자동 조정 ({tier_info_str})')
+    parser.add_argument('--tier_file', type=str, default='grid_tier.csv',
+                        help='Tier 정보 CSV 파일 경로 (기본값: grid_tier.csv)')
     parser.add_argument('--restaurants_dir', type=str, default='restaurants',
                         help='레스토랑 정보 출력 디렉토리 (기본값: restaurants)')
 

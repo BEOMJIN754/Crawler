@@ -108,26 +108,136 @@ def fetch_restaurants_by_text(query: str, max_results: int = 30) -> List[Dict]:
 
 
 import json
+import csv
+import os
+
+def load_tier_info(csv_path: str = "grid_tier.csv") -> Dict[str, str]:
+    """
+    grid_tier.csv 파일을 읽어서 {code: tier} 딕셔너리 반환
+    예: {"MN1": "HOT", "MN2": "HOT", ...}
+    """
+    tier_dict = {}
+    if not os.path.exists(csv_path):
+        print(f"경고: {csv_path} 파일이 없습니다. 기본값(MID)을 사용합니다.")
+        return tier_dict
+
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            code = row.get('code', '').strip()
+            tier = row.get('tier', '').strip()
+            if code and tier:
+                tier_dict[code] = tier
+    return tier_dict
+
+def get_max_results_by_tier(tier: str) -> int:
+    """
+    tier에 따라 가져올 식당 개수 반환
+    config.py의 TIER_RESTAURANT_COUNT 사용
+    """
+    return config.TIER_RESTAURANT_COUNT.get(tier.upper(), 50)  # 기본값 50
+
+def parse_grid_info(txt_path: str = "girdInfo.txt") -> List[Dict[str, str]]:
+    """
+    girdInfo.txt 파일을 읽어서 grid 정보를 파싱
+    반환: [{"code": "MN1", "name": "트라이베카, 금융 지구"}, ...]
+    """
+    grids = []
+    if not os.path.exists(txt_path):
+        print(f"경고: {txt_path} 파일이 없습니다.")
+        return grids
+
+    with open(txt_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('🗽') or line.startswith('1.') or line.startswith('2.') or line.startswith('3.') or line.startswith('4.') or line.startswith('5.'):
+                continue
+
+            # 형식: MN 1,"지역명"
+            if ',' in line:
+                parts = line.split(',', 1)
+                code_part = parts[0].strip()
+                name_part = parts[1].strip().strip('"')
+
+                # 공백 제거 (MN 1 -> MN1)
+                code = code_part.replace(' ', '')
+
+                if code:
+                    grids.append({"code": code, "name": name_part})
+
+    return grids
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--query", required=True, help='예: "restaurants in Seoul" 또는 "sushi restaurants near Gangnam"')
-    ap.add_argument("--max_results", type=int, default=30, help="최대 결과 수 (기본 30)")
+    ap.add_argument("--query", required=False, help='예: "restaurants in Seoul" 또는 "sushi restaurants near Gangnam"')
+    ap.add_argument("--max_results", type=int, required=False, help="최대 결과 수")
     ap.add_argument("--output", type=str, default="restaurants.json", help="결과를 저장할 JSON 파일 이름 (기본 restaurants.json)")
+    ap.add_argument("--grid_mode", action="store_true", help="girdInfo.txt와 grid_tier.csv를 사용하여 자동으로 모든 그리드 처리")
     args = ap.parse_args()
 
-    print(f"Query: {args.query}  |  Max: {args.max_results}")
-    try:
-        places = fetch_restaurants_by_text(args.query, max_results=args.max_results)
-    except Exception as e:
-        print("오류 발생:", e)
-        return
+    if args.grid_mode:
+        # Grid 모드: girdInfo.txt와 grid_tier.csv를 읽어서 처리
+        print("Grid 모드로 실행합니다...")
+        tier_dict = load_tier_info()
+        grids = parse_grid_info()
 
-    # 가져온 식당 정보를 JSON 파일로 저장
-    with open(args.output, 'w', encoding='utf-8') as f:
-        json.dump(places, f, ensure_ascii=False, indent=4)
+        if not grids:
+            print("Grid 정보를 찾을 수 없습니다.")
+            return
 
-    print(f"\n총 {len(places)}개 장소를 가져와 '{args.output}' 파일에 저장했습니다.")
+        print(f"총 {len(grids)}개의 그리드를 처리합니다.")
+
+        for grid in grids:
+            code = grid["code"]
+            name = grid["name"]
+            tier = tier_dict.get(code, "MID")
+            max_results = get_max_results_by_tier(tier)
+
+            query = f"restaurants in {name}, New York"
+            output_file = f"restaurants/restaurants_{code}.json"
+
+            # restaurants 폴더 생성
+            os.makedirs("restaurants", exist_ok=True)
+
+            print(f"\n{'='*60}")
+            print(f"처리 중: {code} - {name}")
+            print(f"Tier: {tier} | 목표 개수: {max_results}")
+            print(f"Query: {query}")
+
+            try:
+                places = fetch_restaurants_by_text(query, max_results=max_results)
+
+                # 파일 저장
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(places, f, ensure_ascii=False, indent=4)
+
+                print(f"✓ 완료: {len(places)}개 장소를 '{output_file}'에 저장했습니다.")
+            except Exception as e:
+                print(f"✗ 오류 발생 ({code}): {e}")
+                continue
+
+        print(f"\n{'='*60}")
+        print("모든 그리드 처리 완료!")
+    else:
+        # 기존 단일 쿼리 모드
+        if not args.query:
+            print("--query 또는 --grid_mode를 지정해야 합니다.")
+            return
+
+        max_results = args.max_results if args.max_results else 30
+        print(f"Query: {args.query}  |  Max: {max_results}")
+
+        try:
+            places = fetch_restaurants_by_text(args.query, max_results=max_results)
+        except Exception as e:
+            print("오류 발생:", e)
+            return
+
+        # 가져온 식당 정보를 JSON 파일로 저장
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(places, f, ensure_ascii=False, indent=4)
+
+        print(f"\n총 {len(places)}개 장소를 가져와 '{args.output}' 파일에 저장했습니다.")
 
 
 if __name__ == "__main__":
